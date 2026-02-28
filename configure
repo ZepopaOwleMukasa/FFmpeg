@@ -4037,8 +4037,8 @@ srtp_protocol_select="rtp_protocol srtp"
 tcp_protocol_select="network"
 tls_protocol_deps_any="gnutls openssl schannel securetransport libtls mbedtls"
 tls_protocol_select="tcp_protocol"
-# TODO: Support libtls, mbedtls.
-dtls_protocol_deps_any="openssl schannel gnutls"
+# TODO: Support libtls.
+dtls_protocol_deps_any="openssl schannel gnutls mbedtls"
 dtls_protocol_select="udp_protocol"
 udp_protocol_select="network"
 udplite_protocol_select="network"
@@ -4289,7 +4289,7 @@ avutil_suggest="clock_gettime ffnvcodec gcrypt libm zlib libdrm libmfx opencl op
 swresample_deps="avutil"
 swresample_suggest="libm libsoxr stdatomic"
 swscale_deps="avutil"
-swscale_suggest="libm stdatomic"
+swscale_suggest="libm stdatomic spirv_library"
 shader_compression_suggest="zlib"
 
 avcodec_extralibs="pthreads_extralibs iconv_extralibs dxva2_extralibs liblcevc_dec_extralibs lcms2_extralibs"
@@ -7315,8 +7315,10 @@ enabled libnpp            && { test_cpp_condition "$(cd "$source_path"; pwd)/lib
                                die "ERROR: libnpp not found"; } &&
                              { check_func_headers "nppi.h" nppiYCbCr420_8u_P2P3R $libnpp_extralibs ||
                                die "ERROR: libnpp support is deprecated, version 13.0 and up are not supported"; }
-enabled libopencore_amrnb && require libopencore_amrnb opencore-amrnb/interf_dec.h Decoder_Interface_init -lopencore-amrnb
-enabled libopencore_amrwb && require libopencore_amrwb opencore-amrwb/dec_if.h D_IF_init -lopencore-amrwb
+enabled libopencore_amrnb && { check_pkg_config libopencore_amrnb opencore-amrnb opencore-amrnb/interf_dec.h Decoder_Interface_init ||
+                               require libopencore_amrnb opencore-amrnb/interf_dec.h Decoder_Interface_init -lopencore-amrnb; }
+enabled libopencore_amrwb && { check_pkg_config libopencore_amrwb opencore-amrwb opencore-amrwb/dec_if.h D_IF_init ||
+                               require libopencore_amrwb opencore-amrwb/dec_if.h D_IF_init -lopencore-amrwb; }
 enabled libopencv         && { check_pkg_config libopencv opencv4 opencv2/core/core_c.h cvCreateImageHeader ||
                                require libopencv opencv2/core/core_c.h cvCreateImageHeader -lopencv_core -lopencv_imgproc; }
 enabled libopencolorio    && require_pkg_config_cxx libopencolorio "OpenColorIO" OpenColorIO/OpenColorIO.h OCIO_NAMESPACE::Config
@@ -7370,7 +7372,8 @@ enabled libv4l2           && require_pkg_config libv4l2 libv4l2 libv4l2.h v4l2_i
 enabled libvidstab        && require_pkg_config libvidstab "vidstab >= 0.98" vid.stab/libvidstab.h vsMotionDetectInit
 enabled libvmaf           && require_pkg_config libvmaf "libvmaf >= 2.0.0" libvmaf.h vmaf_init
 enabled libvmaf           && check_pkg_config libvmaf_cuda "libvmaf >= 2.0.0" libvmaf_cuda.h vmaf_cuda_state_init
-enabled libvo_amrwbenc    && require libvo_amrwbenc vo-amrwbenc/enc_if.h E_IF_init -lvo-amrwbenc
+enabled libvo_amrwbenc    && { check_pkg_config libvo_amrwbenc vo-amrwbenc vo-amrwbenc/enc_if.h E_IF_init ||
+                               require libvo_amrwbenc vo-amrwbenc/enc_if.h E_IF_init -lvo-amrwbenc; }
 enabled libvorbis         && require_pkg_config libvorbis vorbis vorbis/codec.h vorbis_info_init &&
                              require_pkg_config libvorbisenc vorbisenc vorbis/vorbisenc.h vorbis_encode_init
 
@@ -8172,16 +8175,19 @@ enabled threads || warn \
     "environment."
 
 case $target_os in
-haiku)
-    disable memalign
-    disable posix_memalign
-    ;;
 *-dos|freedos|opendos)
     if test_cpp_condition sys/version.h "defined(__DJGPP__) && __DJGPP__ == 2 && __DJGPP_MINOR__ == 5"; then
         disable memalign
     fi
     ;;
 esac
+
+if ! enabled_any memalign posix_memalign aligned_malloc; then
+    if enabled_any asm inline_asm; then
+        die "ERROR: Building with assembly enabled is not supported on platforms "\
+            "without aligned memory allocations! Try reconfiguring with --disable-asm"
+    fi
+fi
 
 flatten_extralibs(){
     nested_entries=
