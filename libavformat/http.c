@@ -155,8 +155,8 @@ typedef struct HTTPContext {
     int nb_retries;
     int nb_reconnects;
     int nb_redirects;
-    int sum_latency; /* divide by nb_requests */
-    int max_latency;
+    int64_t sum_latency; /* divide by nb_requests */
+    int64_t max_latency;
     int max_redirects;
 } HTTPContext;
 
@@ -165,7 +165,7 @@ typedef struct HTTPContext {
 #define E AV_OPT_FLAG_ENCODING_PARAM
 #define DEFAULT_USER_AGENT "Lavf/" AV_STRINGIFY(LIBAVFORMAT_VERSION)
 
-static const AVOption options[] = {
+static const AVOption http_options[] = {
     { "seekable", "control seekability of connection", OFFSET(seekable), AV_OPT_TYPE_BOOL, { .i64 = -1 }, -1, 1, D },
     { "chunked_post", "use chunked transfer-encoding for posts", OFFSET(chunked_post), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, E },
     { "http_proxy", "set HTTP proxy to tunnel through", OFFSET(http_proxy), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, D | E },
@@ -512,6 +512,7 @@ redo:
     return 0;
 
 fail:
+    s->off = off;
     if (s->hd)
         ffurl_closep(&s->hd);
     if (ret < 0)
@@ -1164,7 +1165,7 @@ static void parse_cache_control(HTTPContext *s, const char *p)
     }
 
     if (age) {
-        s->expires = time(NULL) + atoi(p + offset);
+        s->expires = time(NULL) + atoi(age + offset);
     }
 }
 
@@ -1687,7 +1688,15 @@ static int http_connect(URLContext *h, const char *path, const char *local_path,
     if (s->new_location)
         s->off = off;
 
-    err = (off == s->off) ? 0 : -1;
+    if (off != s->off) {
+        av_log(h, AV_LOG_ERROR,
+               "Unexpected offset: expected %"PRIu64", got %"PRIu64"\n",
+               off, s->off);
+        err = AVERROR(EIO);
+        goto done;
+    }
+
+    err = 0;
 done:
     av_freep(&authstr);
     av_freep(&proxyauthstr);
@@ -1831,6 +1840,8 @@ static int http_read_stream(URLContext *h, uint8_t *buf, int size)
     if (s->compressed)
         return http_buf_read_compressed(h, buf, size);
 #endif /* CONFIG_ZLIB */
+
+retry:
     read_ret = http_buf_read(h, buf, size);
     while (read_ret < 0) {
         uint64_t target = h->is_streamed ? 0 : s->off;
@@ -1874,11 +1885,11 @@ static int http_read_stream(URLContext *h, uint8_t *buf, int size)
         conn_attempts++;
         seek_ret = http_seek_internal(h, target, SEEK_SET, 1);
         if (seek_ret >= 0 && seek_ret != target) {
+            ffurl_closep(&s->hd);
             av_log(h, AV_LOG_ERROR, "Failed to reconnect at %"PRIu64".\n", target);
             return read_ret;
         }
 
-retry:
         read_ret = http_buf_read(h, buf, size);
     }
 
@@ -2132,7 +2143,7 @@ static int64_t http_seek_internal(URLContext *h, int64_t off, int whence, int fo
         av_log(h, AV_LOG_DEBUG, "Soft-seeking to offset %"PRIu64" by draining "
                "%"PRIu64" remaining byte(s)\n", s->off, remaining);
         while (remaining) {
-            int ret = ffurl_read(s->hd, discard, FFMIN(remaining, sizeof(discard)));
+            ret = ffurl_read(s->hd, discard, FFMIN(remaining, sizeof(discard)));
             if (ret < 0 || ret == AVERROR_EOF || (ret == 0 && remaining)) {
                 /* connection broken or stuck, need to reopen */
                 ffurl_closep(&s->hd);
@@ -2184,7 +2195,7 @@ static int http_get_short_seek(URLContext *h)
 static const AVClass flavor ## _context_class = {   \
     .class_name = # flavor,                         \
     .item_name  = av_default_item_name,             \
-    .option     = options,                          \
+    .option     = http_options,                     \
     .version    = LIBAVUTIL_VERSION_INT,            \
 }
 
