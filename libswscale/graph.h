@@ -52,7 +52,9 @@ typedef int (*SwsPassSetup)(const SwsFrame *out, const SwsFrame *in,
                             const SwsPass *pass);
 
 /**
- * Represents an allocated output buffer for a filter pass.
+ * Represents an output buffer for a filter pass. During filter graph
+ * construction, these merely hold the metadata. Allocation of the underlying
+ * storage is deferred until after all filter passes are settled.
  */
 typedef struct SwsPassBuffer {
     SwsFrame frame;
@@ -84,10 +86,10 @@ struct SwsPass {
      * Filter input. This pass's output will be resolved to form this pass's.
      * input. If NULL, the original input image is used.
      */
-    const SwsPass *input;
+    SwsPass *input;
 
     /**
-     * Filter output buffer. Allocated on demand and freed automatically.
+     * Filter output buffer. This struct is always allocated.
      */
     SwsPassBuffer *output; /* refstruct */
 
@@ -172,6 +174,11 @@ int ff_sws_graph_add_pass(SwsGraph *graph, enum AVPixelFormat fmt,
                           int align, SwsPassFunc run, SwsPassSetup setup,
                           void *priv, void (*free)(void *priv),
                           SwsPass **out_pass);
+
+/**
+ * Remove all passes added since the given index.
+ */
+void ff_sws_graph_rollback(SwsGraph *graph, int since_idx);
 
 /**
  * Uninitialize any state associate with this filter graph and free it.
