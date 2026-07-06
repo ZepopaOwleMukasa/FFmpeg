@@ -25,6 +25,7 @@
 #include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
 #include "libavutil/crc.h"
+#include "libavutil/error.h"
 #include "libavutil/hash.h"
 #include "libavutil/file_open.h"
 #include "libavutil/mem.h"
@@ -35,7 +36,9 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <stdatomic.h>
+#include <string.h>
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -56,6 +59,8 @@
  */
 #define HASH_METHOD    "SHA512/256"
 #define HASH_SIZE      32
+#define HEADER_MAGIC   MKTAG(u'\xFF', 'S', 'h', '$')
+#define HEADER_VERSION 3
 
 static int hash_uri(uint8_t hash[HASH_SIZE], const char *uri)
 {
@@ -64,8 +69,10 @@ static int hash_uri(uint8_t hash[HASH_SIZE], const char *uri)
     if (ret < 0)
         return ret;
 
+    const int16_t version = HEADER_VERSION;
     av_assert0(av_hash_get_size(ctx) == HASH_SIZE);
     av_hash_init(ctx);
+    av_hash_update(ctx, (const uint8_t *) &version, sizeof(version));
     av_hash_update(ctx, (const uint8_t *) uri, strlen(uri));
     av_hash_final(ctx, hash);
     av_hash_freep(&ctx);
@@ -74,9 +81,6 @@ static int hash_uri(uint8_t hash[HASH_SIZE], const char *uri)
         hash[i] = hash[i] ? hash[i] : ~hash[i]; /* prevent zero bytes */
     return 0;
 }
-
-#define HEADER_MAGIC   MKTAG(u'\xFF', 'S', 'h', '$')
-#define HEADER_VERSION 2
 
 enum BlockState {
     /* Reserved block state values */
@@ -90,9 +94,9 @@ enum BlockState {
      */
 };
 
-static uint16_t get_block_crc(const uint8_t *block, size_t block_size)
+static uint32_t get_block_crc(const uint8_t *block, size_t block_size)
 {
-    uint16_t crc = av_crc(av_crc_get_table(AV_CRC_16_ANSI), 0, block, block_size);
+    uint32_t crc = av_crc(av_crc_get_table(AV_CRC_32_IEEE), 0, block, block_size);
     switch (crc) {
     case BLOCK_NONE:
     case BLOCK_FAILED:
@@ -104,7 +108,7 @@ static uint16_t get_block_crc(const uint8_t *block, size_t block_size)
 }
 
 typedef struct Block {
-    atomic_ushort state; /* enum BlockState */
+    atomic_uint state; /* enum BlockState */
 } Block;
 
 typedef struct Spacemap {
@@ -149,6 +153,7 @@ typedef struct SharedContext {
     int read_only;
     int64_t timeout;
     int retry_errors;
+    int retry_corrupt;
     int verify;
 
     /* misc state */
@@ -292,8 +297,11 @@ static int shared_open(URLContext *h, const char *arg, int flags, AVDictionary *
         if (filesize < 0 && filesize != AVERROR(ENOSYS)) {
             ret = (int) filesize;
             goto fail;
-        } else if (filesize > 0)
-            set_filesize(h, filesize);
+        } else if (filesize > 0) {
+            ret = set_filesize(h, filesize);
+            if (ret < 0)
+                goto fail;
+        }
     }
 
     if (filesize > 0) {
@@ -312,17 +320,16 @@ static int shared_open(URLContext *h, const char *arg, int flags, AVDictionary *
         }
     }
 
-    if (!s->cache_data) {
-        /* Temporary buffer needed for pread/pwrite() fallback */
-        s->tmp_buf = av_malloc(s->block_size);
-        if (!s->tmp_buf) {
-            ret = AVERROR(ENOMEM);
-            goto fail;
-        }
+    /* Temporary buffer needed for pread/pwrite() fallback */
+    s->tmp_buf = av_malloc(s->block_size);
+    if (!s->tmp_buf) {
+        ret = AVERROR(ENOMEM);
+        goto fail;
     }
 
     h->max_packet_size = s->block_size;
     h->min_packet_size = s->block_size;
+    ret = 0;
 
 fail:
     if (ret < 0)
@@ -369,8 +376,7 @@ static int cache_map(URLContext *h, int64_t filesize)
 static int spacemap_remap(URLContext *h, size_t map_size)
 {
     SharedContext *s = h->priv_data;
-    struct flock fl = { .l_type  = F_WRLCK };
-    int ret, did_grow = 0;
+    int ret, did_grow = 0, locked = 0;
     if (map_size <= s->map_size)
         return 0;
 
@@ -386,12 +392,12 @@ static int spacemap_remap(URLContext *h, size_t map_size)
         goto skip_resize;
 
     /* Lock the spacemap to ensure nobody else is currently resizing it */
-    ret = fcntl(s->mapfd, F_SETLKW, &fl);
+    ret = flock(s->mapfd, LOCK_EX);
     if (ret < 0) {
         ret = AVERROR(errno);
         goto fail;
     }
-    fl.l_type = F_UNLCK;
+    locked = 1;
 
     /* Refresh filesize after acquiring the lock */
     ret = fstat(s->mapfd, &st);
@@ -423,15 +429,16 @@ skip_resize:
         goto fail;
     }
 
-    /* fl.l_type is set to F_UNLCK only after successful lock */
-    if (fl.l_type == F_UNLCK)
-        fcntl(s->mapfd, F_SETLK, &fl);
+    if (locked) {
+        flock(s->mapfd, LOCK_UN);
+        locked = 0;
+    }
 
     return did_grow;
 
 fail:
-    if (fl.l_type == F_UNLCK)
-        fcntl(s->mapfd, F_SETLK, &fl);
+    if (locked)
+        flock(s->mapfd, LOCK_UN);
     av_log(h, AV_LOG_ERROR, "Failed to resize space map: %s\n", av_err2str(ret));
     return ret;
 }
@@ -596,9 +603,9 @@ static int shared_read(URLContext *h, unsigned char *buf, int size)
         return ret;
 
     Block *const block = &s->spacemap->blocks[block_id];
-    unsigned short state = atomic_load_explicit(&block->state, memory_order_acquire);
+    unsigned state = atomic_load_explicit(&block->state, memory_order_acquire);
     int64_t pending_since = 0;
-    int verify_read = 0;
+    int verify_read = 0, is_race = 0;
 
 retry:
     switch (state) {
@@ -617,11 +624,13 @@ retry:
             }
         }
 
-        uint16_t crc = get_block_crc(tmp, block_size);
+        uint32_t crc = get_block_crc(tmp, block_size);
         if (crc != state) {
             av_log(h, AV_LOG_ERROR, "Cache corruption detected for block 0x%"PRIx64" at "
-                   "offset 0x%"PRIx64": expected CRC: 0x%04X, got: 0x%04X\n",
+                   "offset 0x%"PRIx64": expected CRC: 0x%08X, got: 0x%08X\n",
                    block_id, block_pos, state, crc);
+            if (s->retry_corrupt)
+                goto read_block;
             return AVERROR(EIO);
         }
 
@@ -638,9 +647,11 @@ retry:
         return size;
 
     case BLOCK_FAILED:
-        if (!s->retry_errors)
-            return AVERROR(EIO);
-        av_fallthrough;
+        if (s->retry_errors)
+            goto read_block;
+        return AVERROR(EIO);
+
+read_block:
     case BLOCK_NONE:
         if (s->read_only)
             break; /* don't mark block as pending */
@@ -659,11 +670,14 @@ retry:
     case BLOCK_PENDING:
         /* Another thread is busy fetching this block, wait for it to finish */
         if (!s->timeout) {
+            is_race = 1;
             break; /* no timeout requested, immediately race to fetch block */
         } else if (pending_since) {
             int64_t new = av_gettime_relative();
-            if (new - pending_since >= s->timeout)
+            if (new - pending_since >= s->timeout) {
+                is_race = 1;
                 break; /* timeout expired, try to fetch the block ourselves */
+            }
         } else {
             pending_since = av_gettime_relative();
         }
@@ -718,7 +732,7 @@ retry:
     }
 
     int write_back = 1;
-    if (s->cache_data) {
+    if (s->cache_data && !is_race) {
         /* Read directly into memory mapped cache file */
         tmp = s->cache_data + block_pos;
         write_back = 0;
@@ -740,11 +754,15 @@ retry:
         else if (ret < 0) {
             av_log(h, AV_LOG_ERROR, "Failed to read block 0x%"PRIx64": %s\n",
                    block_id, av_err2str(ret));
+            int new_state = BLOCK_FAILED;
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EXIT)
+                new_state = BLOCK_NONE; /* transient error, allow retries */
+
             /* Try to mark block as failed; ignore errors - any mismatch
              * here will mean that either another thread already marked it
              * as failed, or successfully cached it in the meantime */
             atomic_compare_exchange_strong_explicit(&block->state, &state,
-                                                    BLOCK_FAILED,
+                                                    new_state,
                                                     memory_order_relaxed,
                                                     memory_order_relaxed);
             return ret;
@@ -774,9 +792,9 @@ retry:
                                                     memory_order_relaxed,
                                                     memory_order_relaxed);
         } else {
-            uint16_t crc = get_block_crc(tmp, bytes_read);
+            uint32_t crc = get_block_crc(tmp, bytes_read);
             av_log(h, AV_LOG_TRACE, "Cached %d bytes to block 0x%"PRIx64" at "
-                   "offset 0x%"PRIx64", CRC 0x%04X\n", bytes_read, block_id,
+                   "offset 0x%"PRIx64", CRC 0x%08X\n", bytes_read, block_id,
                    block_pos, crc);
             atomic_store_explicit(&block->state, crc, memory_order_release);
         }
@@ -785,7 +803,8 @@ retry:
     }
 
     size = FFMIN(bytes_read - offset, size);
-    av_assert0(size > 0);
+    if (size <= 0)
+        return AVERROR_EOF;
     if (tmp != buf)
         memcpy(buf, &tmp[offset], size);
     s->pos += size;
@@ -803,8 +822,10 @@ static int64_t shared_seek(URLContext *h, int64_t pos, int whence)
         if (filesize)
             return filesize;
         res = ffurl_seek(s->inner, pos, whence);
-        if (res > 0)
-            set_filesize(h, res);
+        if (res > 0) {
+            if (set_filesize(h, res) < 0)
+                return AVERROR(EINVAL);
+        }
         return res;
     case SEEK_SET:
         break;
@@ -820,7 +841,9 @@ static int64_t shared_seek(URLContext *h, int64_t pos, int whence)
         res = ffurl_seek(s->inner, pos, whence);
         if (res < 0)
             return res;
-        set_filesize(h, res - pos); /* Opportunistically update known filesize */
+        /* Opportunistically update known filesize */
+        if (set_filesize(h, res - pos) < 0)
+            return AVERROR(EINVAL);
         av_log(h, AV_LOG_DEBUG, "Inner seek to 0x%"PRIx64"\n", res);
         return s->pos = s->inner_pos = res;
     default:
@@ -844,9 +867,7 @@ static int shared_get_short_seek(URLContext *h)
 {
     SharedContext *s = h->priv_data;
     int ret = ffurl_get_short_seek(s->inner);
-    if (ret < 0)
-        return ret;
-    return FFMAX(ret, s->block_size);
+    return ret > 0 ? FFMAX(ret, s->block_size) : s->block_size;
 }
 
 #define OFFSET(x) offsetof(SharedContext, x)
@@ -857,8 +878,9 @@ static const AVOption options[] = {
     { "block_shift",    "Set the base 2 logarithm of the block size",       OFFSET(block_shift),    AV_OPT_TYPE_INT, {.i64 = 15}, 9, 30, .flags = D },
     { "read_only",      "Don't write data to the cache, only read from it", OFFSET(read_only),      AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, .flags = D },
     { "cache_verify",   "Verify correctness of the cache against the source",   OFFSET(verify),     AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, .flags = D },
-    { "cache_timeout",  "Time in us to wait before re-fetching pending blocks", OFFSET(timeout),    AV_OPT_TYPE_INT64, {.i64 = 0}, 0, INT64_MAX, .flags = D },
+    { "cache_timeout",  "Time in us to wait before re-fetching pending blocks", OFFSET(timeout),    AV_OPT_TYPE_INT64, {.i64 = 10000}, 0, INT64_MAX, .flags = D },
     { "retry_errors",   "Re-request blocks even if they previously failed", OFFSET(retry_errors),   AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, .flags = D },
+    { "retry_corrupt",  "Re-request blocks that fail the CRC check",        OFFSET(retry_corrupt),  AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, .flags = D },
     {0},
 };
 

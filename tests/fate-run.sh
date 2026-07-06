@@ -182,7 +182,7 @@ probegaplessinfo(){
     pktfile1="${outdir}/${test}.pkts"
     framefile1="${outdir}/${test}.frames"
     cleanfiles="$cleanfiles $pktfile1 $framefile1"
-    run ffprobe${PROGSUF}${EXECSUF} -bitexact -threads $threads -select_streams a -of compact -count_packets -show_entries packet=pts,dts,duration,flags:stream=nb_read_packets "$filename" "$@" > "$pktfile1"
+    run ffprobe${PROGSUF}${EXECSUF} -bitexact -threads $threads -select_streams a -of compact -count_packets -show_entries packet=pts,dts,duration,flags:packet_side_data:stream=nb_read_packets "$filename" "$@" > "$pktfile1"
     head -n 8 "$pktfile1"
     tail -n 9 "$pktfile1"
     run ffprobe${PROGSUF}${EXECSUF} -bitexact -threads $threads -select_streams a -of compact -count_frames -show_entries frame=pts,pkt_dts,best_effort_timestamp,pkt_duration,nb_samples:stream=nb_read_frames "$filename" "$@" > "$framefile1"
@@ -359,6 +359,8 @@ stream_remux(){
     tencfile=$(target_path $encfile)
     ffmpeg -f $src_fmt $src_opts -i $tsrcfile $stream_maps -codec copy $FLAGS \
         -f $enc_fmt -y $tencfile || return
+    do_md5sum $encfile
+    echo $(wc -c $encfile)
     ffmpeg $DEC_OPTS $final_decode -i $tencfile $ENC_OPTS $FLAGS $final_encode \
         -f framecrc - || return
     test -z "$ffprobe_opts" || \
@@ -499,6 +501,21 @@ lavf_image2pipe(){
     do_avconv $file -auto_conversion_filters $DEC_OPTS -f image2 -c:v pgmyuv -i $raw_src \
               -f image2pipe "$ENC_OPTS -metadata title=lavftest" -t 1 -qscale 10 || return
     do_avconv_crc $file -auto_conversion_filters $DEC_OPTS -f image2pipe -i $target_path/$file
+}
+
+img2_update_filemtime(){
+    outdir="tests/data/lavf"
+    file=${outdir}/img2_mtime_%03d.pgm
+    cleanfiles="$cleanfiles ${outdir}/img2_mtime_001.pgm ${outdir}/img2_mtime_002.pgm ${outdir}/img2_mtime_003.pgm"
+    ffmpeg -f lavfi -i "color=c=black:s=2x2:r=1:d=3,format=gray8" \
+           -c:v pgm \
+           -metadata creation_time="2024-01-01T00:00:00.000000Z" \
+           -update_filemtime 1 \
+           -y $file || return
+    probe -f image2 -ts_from_file sec \
+          -show_entries packet=pts \
+          -of csv=p=0 \
+          -i $file
 }
 
 lavf_video(){
