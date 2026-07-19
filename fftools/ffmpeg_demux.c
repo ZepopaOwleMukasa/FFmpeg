@@ -1007,6 +1007,7 @@ static void ist_free(InputStream **pist)
 
     av_frame_free(&ds->decoded_params);
 
+    av_freep(&ds->dsg);
     av_bsf_free(&ds->bsf);
 
     av_freep(pist);
@@ -2286,6 +2287,11 @@ int ifile_open(const OptionsContext *o, const char *filename, Scheduler *sch)
         } else {
             recording_time = stop_time - start;
         }
+    }
+
+    if (recording_time < 0) {
+        av_log(d, AV_LOG_ERROR, "-t value must be non-negative; aborting.\n");
+        return AVERROR(EINVAL);
     }
 
     if (o->format) {
