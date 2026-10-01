@@ -415,7 +415,8 @@ FATE_PNG += fate-png-int-rgb24
 fate-png-int-rgb24: CMD = framecrc -i $(TARGET_SAMPLES)/png1/lena-int_rgb24.png -sws_flags +accurate_rnd+bitexact
 
 FATE_PNG_PROBE += fate-png-frame-metadata
-fate-png-frame-metadata: CMD = run ffprobe$(PROGSSUF)$(EXESUF) -show_entries frame_tags \
+fate-png-frame-metadata: CMD = run ffprobe$(PROGSSUF)$(EXESUF) -f image2 \
+    -export_path_metadata 1 -show_entries frame_tags=gamma,Software,lavf.image2dec.source_basename \
     -i $(TARGET_SAMPLES)/filter/pixelart0.png
 
 FATE_PNG_PROBE += fate-png-side-data
@@ -625,6 +626,18 @@ FATE_IMAGE += $(FATE_IMAGE-yes)
 FATE_IMAGE_PROBE += $(FATE_IMAGE_PROBE-yes)
 FATE_IMAGE_TRANSCODE += $(FATE_IMAGE_TRANSCODE-yes)
 
+FATE_JPEG_MPF-$(call ALLYES, LAVFI_INDEV TESTSRC2_FILTER SCALE_FILTER FORMAT_FILTER \
+    SPLIT_FILTER SETPARAMS_FILTER GAINMAP_FILTER MJPEG_ENCODER JPEG_MPF_MUXER \
+    FILE_PROTOCOL) += fate-jpeg-mpf-gainmap
+fate-jpeg-mpf-gainmap: tests/data/filtergraphs/jpeg_mpf_gainmap
+fate-jpeg-mpf-gainmap: CMD = md5 -bitexact -sws_flags +accurate_rnd+bitexact \
+    -/filter_complex $(TARGET_PATH)/tests/data/filtergraphs/jpeg_mpf_gainmap \
+    -map "[base]" -map "[gain]" -stream_group "type=gain_map:st=0:st=1:el_index=1" \
+    -pix_fmt yuvj444p -c:v mjpeg -dct int -f jpeg_mpf
+
+FATE_FFMPEG += $(FATE_JPEG_MPF-yes)
+fate-jpeg-mpf: $(FATE_JPEG_MPF-yes)
+
 FATE_IMG2_MUXER-$(call ALLYES, LAVFI_INDEV COLOR_FILTER FORMAT_FILTER \
     PGM_ENCODER IMAGE2_MUXER IMAGE2_DEMUXER FILE_PROTOCOL FFPROBE) \
     += fate-img2-update-filemtime
@@ -637,4 +650,4 @@ FATE_SAMPLES_FFMPEG += $(FATE_IMAGE)
 FATE_SAMPLES_FFPROBE += $(FATE_IMAGE_PROBE)
 FATE_SAMPLES_FFMPEG_FFPROBE += $(FATE_IMAGE_TRANSCODE)
 
-fate-image: $(FATE_IMAGE) $(FATE_IMAGE_PROBE) $(FATE_IMAGE_TRANSCODE) $(FATE_IMG2_MUXER-yes)
+fate-image: $(FATE_IMAGE) $(FATE_IMAGE_PROBE) $(FATE_IMAGE_TRANSCODE) $(FATE_IMG2_MUXER-yes) $(FATE_JPEG_MPF-yes)

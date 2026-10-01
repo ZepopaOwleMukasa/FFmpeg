@@ -184,6 +184,9 @@ fate-filter-lavd-scalenorm: CMD = framecrc -f lavfi -graph_file $(TARGET_PATH)/t
 FATE_FILTER-$(call FILTERFRAMECRC, COLOR FORMAT SCALE CROP) += fate-filter-scale-fast-bilinear-wide-edge
 fate-filter-scale-fast-bilinear-wide-edge: CMD = framecrc -flags bitexact -lavfi color=c=red:s=40000x1:r=1:d=1,format=yuv444p,scale=40032:1:flags=fast_bilinear,crop=1:1:40031:0 -frames:v 1
 
+FATE_FILTER-$(call FILTERFRAMECRC, NULLSRC GEQ FORMAT SCALE CROP) += fate-filter-scale-fast-bilinear-wide-wrap
+fate-filter-scale-fast-bilinear-wide-wrap: CMD = framecrc -flags bitexact -lavfi 'nullsrc=s=300000x1,geq=lum=X*255/W:cb=128:cr=128,format=gray,scale=300032:1:flags=fast_bilinear,crop=1:1:279000:0' -frames:v 1
+
 FATE_FILTER-$(call FILTERFRAMECRC, TESTSRC2 FEEDBACK HFLIP, LAVFI_INDEV) += fate-filter-feedback-hflip
 fate-filter-feedback-hflip: CMD = framecrc -f lavfi -i testsrc2=d=1 -vf "[in][hflipin]feedback=x=0:y=0:w=100:h=100[out][hflipout];[hflipout]hflip[hflipin]"
 
@@ -221,6 +224,14 @@ $(FATE_FILTER_FRAMEPACK): CMD = framecrc -c:v pgmyuv -i $(TARGET_PATH)/tests/vsy
 FATE_FILTER_VSYNTH_PGMYUV-$(CONFIG_FRAMEPACK_FILTER) += $(FATE_FILTER_FRAMEPACK)
 fate-filter-framepack: $(FATE_FILTER_FRAMEPACK)
 
+FATE_FILTER_GAINMAP_SRC = testsrc2=s=64x48:r=1:d=1,scale,format=gbrpf32,split[b][a];[b]setparams=color_trc=iec61966-2-1:color_primaries=bt709[base];[a]setparams=color_trc=smpte2084:color_primaries=bt2020[alt];[base][alt]
+
+FATE_FILTER-$(call FILTERFRAMECRC, GAINMAP TESTSRC2 FORMAT SETPARAMS SPLIT, SCALE_FILTER) += fate-filter-gainmap fate-filter-gainmap-luma fate-filter-gainmap-maxrgb fate-filter-gainmap-fixed
+fate-filter-gainmap: CMD = framecrc -lavfi "$(FATE_FILTER_GAINMAP_SRC)gainmap,scale" -pix_fmt gbrp
+fate-filter-gainmap-luma: CMD = framecrc -lavfi "$(FATE_FILTER_GAINMAP_SRC)gainmap=mode=luma,scale" -pix_fmt gray
+fate-filter-gainmap-maxrgb: CMD = framecrc -lavfi "$(FATE_FILTER_GAINMAP_SRC)gainmap=mode=maxrgb,scale" -pix_fmt gray
+fate-filter-gainmap-fixed: CMD = framecrc -lavfi "$(FATE_FILTER_GAINMAP_SRC)gainmap=min=0:max=2.3:gamma=1:base_nits=203:alt_nits=1000,scale" -pix_fmt gbrp
+
 FATE_FILTER_VSYNTH_PGMYUV-$(CONFIG_GRADFUN_FILTER) += fate-filter-gradfun
 fate-filter-gradfun: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf gradfun
 
@@ -238,6 +249,9 @@ fate-filter-negate: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf perms=random,negate
 
 FATE_FILTER_VSYNTH_PGMYUV-$(CONFIG_HISTOGRAM_FILTER) += fate-filter-histogram-levels
 fate-filter-histogram-levels: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf histogram -flags +bitexact -sws_flags +accurate_rnd+bitexact
+
+FATE_FILTER-$(call FILTERFRAMECRC, TESTSRC2 FORMAT THISTOGRAM) += fate-filter-thistogram-scroll
+fate-filter-thistogram-scroll: CMD = framecrc -lavfi testsrc2=s=65x49:r=1:d=1,format=yuv420p,thistogram=display_mode=parade:components=7:slide=scroll -flags +bitexact
 
 FATE_FILTER_VSYNTH_PGMYUV-$(CONFIG_WAVEFORM_FILTER) += fate-filter-waveform_column
 fate-filter-waveform_column: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf waveform -flags +bitexact -sws_flags +accurate_rnd+bitexact
@@ -497,6 +511,15 @@ fate-filter-fps-down-round-up: CMD = framecrc -lavfi testsrc2=r=7:d=3.5,fps=3:ro
 fate-filter-fps-down-eof-pass: CMD = framecrc -lavfi testsrc2=r=7:d=3.5,fps=3:eof_action=pass
 fate-filter-fps-start-drop: CMD = framecrc -lavfi testsrc2=r=7:d=3.5,fps=3:start_time=1.5
 fate-filter-fps-start-fill: CMD = framecrc -lavfi testsrc2=r=7:d=1.5,setpts=PTS+14,fps=3:start_time=1.5
+
+FATE_LIBAVFILTER-yes += fate-filter-drawutils
+fate-filter-drawutils: libavfilter/tests/drawutils$(EXESUF)
+fate-filter-drawutils: CMD = run libavfilter/tests/drawutils$(EXESUF)
+
+FATE_LIBAVFILTER-$(CONFIG_NLMEANS_FILTER) += fate-filter-nlmeans-integral
+fate-filter-nlmeans-integral: libavfilter/tests/integral$(EXESUF)
+fate-filter-nlmeans-integral: CMD = run libavfilter/tests/integral$(EXESUF)
+fate-filter-nlmeans-integral: CMP = null
 
 DRAWVG_SCRIPT_ALL = $(SRC_PATH)/tests/ref/lavf/drawvg.all
 
@@ -917,6 +940,8 @@ FATE_SAMPLES_FFMPEG += $(FATE_FILTER_SAMPLES-yes)
 FATE_FFPROBE += $(FATE_FILTER_FFPROBE-yes)
 FATE_FFMPEG += $(FATE_FILTER-yes)
 
-fate-vfilter: $(FATE_FILTER-yes) $(FATE_FILTER_SAMPLES-yes) $(FATE_FILTER_VSYNTH-yes)
+FATE-$(CONFIG_AVFILTER) += $(FATE_LIBAVFILTER-yes)
+
+fate-vfilter: $(FATE_FILTER-yes) $(FATE_FILTER_SAMPLES-yes) $(FATE_FILTER_VSYNTH-yes) $(FATE_LIBAVFILTER-yes)
 
 fate-filter: fate-afilter fate-vfilter $(FATE_METADATA_FILTER-yes) $(FATE_FILTER_FFPROBE-yes)
